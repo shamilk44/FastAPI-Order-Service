@@ -1,8 +1,42 @@
+import asyncio
+import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.product import Product
 from app.schemas.product import ProductCreate, ProductUpdate
+from app.services import search_service
+
+logger = logging.getLogger(__name__)
+
+
+async def sync_product_to_search(product: Product) -> None:
+    """Update the search index without blocking the event loop."""
+    try:
+        await asyncio.to_thread(
+            search_service.index_product,
+            product,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to index product %s",
+            product.id,
+        )
+
+
+async def remove_product_from_search(product_id: int) -> None:
+    """Remove a product from the search index."""
+    try:
+        await asyncio.to_thread(
+            search_service.delete_indexed_product,
+            product_id,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to remove product %s from search index",
+            product_id,
+        )
 
 
 async def create_product(
@@ -14,6 +48,8 @@ async def create_product(
     db.add(product)
     await db.commit()
     await db.refresh(product)
+
+    await sync_product_to_search(product)
 
     return product
 
@@ -48,6 +84,8 @@ async def update_product(
     await db.commit()
     await db.refresh(product)
 
+    await sync_product_to_search(product)
+
     return product
 
 
@@ -55,5 +93,9 @@ async def delete_product(
     db: AsyncSession,
     product: Product,
 ) -> None:
+    product_id = product.id
+
     await db.delete(product)
     await db.commit()
+
+    await remove_product_from_search(product_id)

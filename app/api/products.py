@@ -1,11 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, literal_column, select
+﻿from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.session import AsyncSessionLocal
 from app.models.product import Product
 from app.schemas.product import ProductCreate, ProductResponse, ProductUpdate
-from app.services import product_service
+from app.services import product_service, search_service
 
 router = APIRouter(prefix="/products", tags=["Products"])
 
@@ -34,31 +33,46 @@ async def list_products(
     return await product_service.get_products(db)
 
 
-# Search products using PostgreSQL full-text search.
-# Keep this route before /{product_id}.
 @router.get("/search", response_model=list[ProductResponse])
 async def search_products(
     q: str = Query(..., min_length=1, description="Product search keywords"),
     limit: int = Query(10, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
 ):
-    search_vector = literal_column(
-        "to_tsvector('english', name || ' ' || COALESCE(description, ''))"
-    )
-
-    search_query = func.plainto_tsquery("english", q)
-
-    statement = (
-        select(Product)
-        .where(
-            search_vector.op("@@")(search_query),
-            Product.is_active.is_(True),
+    try:
+        hits = await __import__("asyncio").to_thread(
+            search_service.search_products,
+            q,
+            limit,
         )
-        .limit(limit)
-    )
+        product_ids = [int(hit["id"]) for hit in hits]
 
-    result = await db.execute(statement)
-    return result.scalars().all()
+        if not product_ids:
+            return []
+
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as db:
+            result = await db.execute(
+                select(Product).where(
+                    Product.id.in_(product_ids),
+                    Product.is_active.is_(True),
+                )
+            )
+            products = result.scalars().all()
+            products_by_id = {product.id: product for product in products}
+
+            return [
+                products_by_id[product_id]
+                for product_id in product_ids
+                if product_id in products_by_id
+            ]
+
+    except Exception as exc:
+        print(f"Meilisearch search failed: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Product search is temporarily unavailable",
+        ) from exc
 
 
 @router.get("/{product_id}", response_model=ProductResponse)
@@ -91,9 +105,7 @@ async def edit_product(
             detail="Product not found",
         )
 
-    return await product_service.update_product(
-        db, product, product_data
-    )
+    return await product_service.update_product(db, product, product_data)
 
 
 @router.delete("/{product_id}")

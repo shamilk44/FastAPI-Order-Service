@@ -17,17 +17,47 @@
       retries: 10
     restart: unless-stopped
 
+  meilisearch:
+    image: getmeili/meilisearch:v1.12
+    container_name: order_service_meilisearch
+    environment:
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: "true"
+    ports:
+      - "7700:7700"
+    volumes:
+      - meilisearch_data:/meili_data
+    restart: unless-stopped
+
   api:
     build: .
     container_name: order_service_api
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:local_dev_password@db:5432/order_service
+      MEILISEARCH_URL: http://meilisearch:7700
+      MEILISEARCH_INDEX: products
     ports:
       - "8000:8000"
     depends_on:
       db:
         condition: service_healthy
+      meilisearch:
+        condition: service_started
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: order_service_frontend
+    ports:
+      - "5173:5173"
+    environment:
+      VITE_API_TARGET: http://api:8000
+    depends_on:
+      - api
     restart: unless-stopped
 
 volumes:
   postgres_data:
+  meilisearch_data:
